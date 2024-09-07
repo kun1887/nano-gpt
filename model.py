@@ -3,12 +3,61 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 # hyperparameters
+max_iters = 200
 n_embd = 10
 dropout = 0.0
-vocab_size = 100
 block_size = 12
 n_head = 2
 n_layer = 2
+batch_size = 16
+device = "cuda" if torch.cuda.is_available() else "cpu"
+learning_rate = 1e-3
+eval_iters = 50
+eval_interval = 20
+
+# Data loading and preparation
+with open("all_tswift_lyrics.txt", "r", encoding="utf-8") as f:
+    text = f.read()
+
+chars = sorted(list(set(text)))
+vocab_size = len(chars)
+stoi = {ch: i for i, ch in enumerate(chars)}
+itos = {i: ch for i, ch in enumerate(chars)}
+encode = lambda s: [stoi[ch] for ch in s]
+decode = lambda l: "".join([itos[n] for n in l])
+
+data = torch.tensor(encode(text), dtype=torch.long)
+n_split = int(0.9 * len(data))
+train_data = data[:n_split]
+val_data = data[n_split:]
+
+
+def get_batch(split):
+
+    data = train_data if split == "train" else val_data
+    ix = torch.randint(len(data) - block_size, (batch_size,))
+
+    x = torch.stack([data[i : i + block_size] for i in ix])
+    y = torch.stack(
+        [data[i + 1 : i + block_size + 1] for i in ix]
+    )  # target is input shifted to right by one position
+    x, y = x.to(device), y.to(device)
+    return x, y
+
+
+@torch.no_grad()
+def get_losses():
+    out = {}
+    model.eval()
+    for split in ["train", "val"]:  # get the mean of both train and eval loss
+        losses = torch.zeros(eval_iters)
+        for k in range(eval_iters):
+            X, Y = get_batch(split)
+            logits, loss = model(X, Y)
+            losses[k] = loss.item()
+        out[split] = losses.mean()
+    model.train()
+    return out
 
 
 class attention_head(nn.Module):
@@ -141,3 +190,33 @@ class GPT(nn.Module):
             # append sampled index to the running sequence
             idx = torch.cat((idx, idx_next), dim=1)  # (B, T+1)
         return idx
+
+
+def train(model):
+
+    # optimizer
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+
+    # training loop
+    for iter in range(max_iters):
+
+        if iter % eval_interval == 0 or iter == max_iters - 1:
+            losses = get_losses()
+            print(
+                f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}"
+            )
+
+        # sample data
+        xb, yb = get_batch("train")
+
+        # evaluate loss
+        logits, loss = model(xb, yb)
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
+
+
+if __name__ == "__main__":
+    model = GPT()
+    model = model.to(device)
+    train(model)
